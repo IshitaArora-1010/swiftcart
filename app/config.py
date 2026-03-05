@@ -1,5 +1,5 @@
 from typing import Optional
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
@@ -13,9 +13,10 @@ class Settings(BaseSettings):
     # Anthropic API key for AI chat support — optional, chat degrades gracefully without it
     ANTHROPIC_API_KEY: Optional[str] = None
 
-    class Config:
-        env_file = ".env"       # Load values from .env file if present
-        extra = "ignore"        # Silently ignore any extra keys in .env
+    model_config = SettingsConfigDict(
+        env_file=".env",   # Load values from .env file if present
+        extra="ignore",    # Silently ignore any extra keys in .env
+    )
 
 
 settings = Settings()
