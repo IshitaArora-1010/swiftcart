@@ -13,7 +13,6 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 # Base class for all ORM models (Order, OrderItem inherit from this)
 Base = declarative_base()
 
-
 def get_db():
     """
     FastAPI dependency that provides a database session per request.

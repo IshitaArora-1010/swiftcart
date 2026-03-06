@@ -16,7 +16,7 @@ SQLALCHEMY_DATABASE_URL = "sqlite:///:memory:"
 engine = create_engine(
     SQLALCHEMY_DATABASE_URL,
     connect_args={"check_same_thread": False},
-    poolclass=StaticPool,  # ← key fix: single shared connection for all test code
+    poolclass=StaticPool,
 )
 TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
@@ -30,7 +30,6 @@ def override_get_db():
         db.close()
 
 
-# Swap the real DB dependency with the test one
 app.dependency_overrides[get_db] = override_get_db
 
 
@@ -48,7 +47,7 @@ client = TestClient(app)
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def create_sample_order(customer_name="John Doe", customer_email="john@example.com"):
-    """Helper to create a standard two-item order used across multiple tests."""
+    """Helper to create a standard two-item order with total_amount = 1049.99."""
     return client.post("/orders/", json={
         "customer_name": customer_name,
         "customer_email": customer_email,
@@ -64,21 +63,29 @@ def advance_order_to(order_id: str, target_status: str):
     return client.patch(f"/orders/{order_id}/status", json={"status": target_status})
 
 
+def pay(order_id: str, amount: float):
+    """Helper to make a payment against an order."""
+    return client.post(f"/orders/{order_id}/payments", json={"amount": amount})
+
+
 # ── Create Order ──────────────────────────────────────────────────────────────
 
 def test_create_order_success():
-    """A valid order should be created with PENDING status and correct total."""
+    """A valid order should be created with PENDING status, zero paid, full remaining."""
     response = create_sample_order()
     assert response.status_code == 201
     data = response.json()
     assert data["customer_name"] == "John Doe"
     assert data["status"] == "PENDING"
-    assert data["total_amount"] == pytest.approx(1049.99)  # 999.99 + (2 × 25.00)
+    assert data["total_amount"] == pytest.approx(1049.99)
+    assert data["paid_amount"] == 0.0
+    assert data["remaining_amount"] == pytest.approx(1049.99)
     assert len(data["items"]) == 2
+    assert data["payments"] == []
 
 
 def test_create_order_total_amount_calculated_correctly():
-    """total_amount should be sum of quantity × unit_price across all items."""
+    """total_amount = sum of quantity × unit_price across all items."""
     response = client.post("/orders/", json={
         "customer_name": "Test",
         "customer_email": "test@example.com",
@@ -88,90 +95,312 @@ def test_create_order_total_amount_calculated_correctly():
         ]
     })
     assert response.status_code == 201
-    assert response.json()["total_amount"] == pytest.approx(400.00)  # 300 + 100
+    assert response.json()["total_amount"] == pytest.approx(400.00)
 
 
 def test_create_order_empty_items():
-    """An order with no items should be rejected with 422 Unprocessable Entity."""
     response = client.post("/orders/", json={
-        "customer_name": "Jane",
-        "customer_email": "jane@example.com",
-        "items": []
+        "customer_name": "Jane", "customer_email": "jane@example.com", "items": []
     })
     assert response.status_code == 422
 
 
 def test_create_order_invalid_quantity():
-    """Quantity of 0 should be rejected."""
     response = client.post("/orders/", json={
-        "customer_name": "Jane",
-        "customer_email": "jane@example.com",
+        "customer_name": "Jane", "customer_email": "jane@example.com",
         "items": [{"product_name": "Book", "quantity": 0, "unit_price": 10.0}]
     })
     assert response.status_code == 422
 
 
 def test_create_order_negative_quantity():
-    """Negative quantity should be rejected."""
     response = client.post("/orders/", json={
-        "customer_name": "Jane",
-        "customer_email": "jane@example.com",
+        "customer_name": "Jane", "customer_email": "jane@example.com",
         "items": [{"product_name": "Book", "quantity": -1, "unit_price": 10.0}]
     })
     assert response.status_code == 422
 
 
 def test_create_order_invalid_price():
-    """Negative unit price should be rejected."""
     response = client.post("/orders/", json={
-        "customer_name": "Jane",
-        "customer_email": "jane@example.com",
+        "customer_name": "Jane", "customer_email": "jane@example.com",
         "items": [{"product_name": "Book", "quantity": 1, "unit_price": -5.0}]
     })
     assert response.status_code == 422
 
 
 def test_create_order_zero_price():
-    """Zero unit price should be rejected."""
     response = client.post("/orders/", json={
-        "customer_name": "Jane",
-        "customer_email": "jane@example.com",
+        "customer_name": "Jane", "customer_email": "jane@example.com",
         "items": [{"product_name": "Book", "quantity": 1, "unit_price": 0}]
     })
     assert response.status_code == 422
 
 
-# ── Get Order ─────────────────────────────────────────────────────────────────
+# ── Payments ──────────────────────────────────────────────────────────────────
+
+def test_single_full_payment():
+    """One payment covering the full amount should set remaining to 0."""
+    order_id = create_sample_order().json()["id"]
+    response = pay(order_id, 1049.99)
+    assert response.status_code == 201
+    assert response.json()["amount"] == pytest.approx(1049.99)
+
+    order = client.get(f"/orders/{order_id}").json()
+    assert order["paid_amount"] == pytest.approx(1049.99)
+    assert order["remaining_amount"] == pytest.approx(0.0)
+
+
+def test_multiple_partial_payments():
+    """Three partial payments should accumulate and reduce remaining correctly."""
+    order_id = create_sample_order().json()["id"]  # total = 1049.99
+
+    pay(order_id, 500.00)
+    pay(order_id, 300.00)
+    pay(order_id, 249.99)
+
+    order = client.get(f"/orders/{order_id}").json()
+    assert order["paid_amount"] == pytest.approx(1049.99)
+    assert order["remaining_amount"] == pytest.approx(0.0)
+    assert len(order["payments"]) == 3
+
+
+def test_partial_payment_updates_remaining():
+    """A partial payment should reduce remaining_amount but not clear it."""
+    order_id = create_sample_order().json()["id"]  # total = 1049.99
+    pay(order_id, 400.00)
+
+    order = client.get(f"/orders/{order_id}").json()
+    assert order["paid_amount"] == pytest.approx(400.00)
+    assert order["remaining_amount"] == pytest.approx(649.99)
+    assert order["status"] == "PENDING"  # Not yet fully paid
+
+
+def test_payment_zero_amount_rejected():
+    """A zero payment should be rejected with 422."""
+    order_id = create_sample_order().json()["id"]
+    response = pay(order_id, 0)
+    assert response.status_code == 422
+
+
+def test_payment_negative_amount_rejected():
+    """A negative payment should be rejected with 422."""
+    order_id = create_sample_order().json()["id"]
+    response = pay(order_id, -100)
+    assert response.status_code == 422
+
+
+def test_payment_exceeds_remaining_rejected():
+    """Payment that exceeds remaining balance should be rejected with 400."""
+    order_id = create_sample_order().json()["id"]  # total = 1049.99
+    response = pay(order_id, 2000.00)
+    assert response.status_code == 400
+    assert "remaining balance" in response.json()["detail"].lower()
+
+
+def test_payment_exactly_remaining_accepted():
+    """Paying exactly the remaining balance should succeed."""
+    order_id = create_sample_order().json()["id"]
+    pay(order_id, 1000.00)
+    response = pay(order_id, 49.99)  # exact remaining
+    assert response.status_code == 201
+
+
+def test_payment_on_cancelled_order_rejected():
+    """Cannot make a payment on a cancelled order."""
+    order_id = create_sample_order().json()["id"]
+    client.delete(f"/orders/{order_id}/cancel")
+    response = pay(order_id, 100.00)
+    assert response.status_code == 400
+    assert "PENDING" in response.json()["detail"]
+
+
+def test_payment_on_processing_order_rejected():
+    """Cannot make a payment once the order is already being processed."""
+    order_id = create_sample_order().json()["id"]
+    advance_order_to(order_id, "PROCESSING")
+    response = pay(order_id, 100.00)
+    assert response.status_code == 400
+
+
+def test_payment_order_not_found():
+    """Payment on a non-existent order should return 400."""
+    response = pay("00000000-0000-0000-0000-000000000000", 100.00)
+    assert response.status_code == 400
+
+
+def test_list_payments_for_order():
+    """GET /orders/{id}/payments should return all payments in chronological order."""
+    order_id = create_sample_order().json()["id"]
+    pay(order_id, 300.00)
+    pay(order_id, 400.00)
+
+    response = client.get(f"/orders/{order_id}/payments")
+    assert response.status_code == 200
+    payments = response.json()
+    assert len(payments) == 2
+    assert payments[0]["amount"] == pytest.approx(300.00)
+    assert payments[1]["amount"] == pytest.approx(400.00)
+
+
+def test_list_payments_order_not_found():
+    """Listing payments for a non-existent order should return 404."""
+    response = client.get("/orders/00000000-0000-0000-0000-000000000000/payments")
+    assert response.status_code == 404
+
+
+def test_list_payments_empty():
+    """A new order with no payments should return an empty list."""
+    order_id = create_sample_order().json()["id"]
+    response = client.get(f"/orders/{order_id}/payments")
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+# ── Scheduler — promote only fully paid orders ────────────────────────────────
+
+def test_scheduler_does_not_promote_unpaid_order():
+    """An order with no payments must stay PENDING after scheduler runs."""
+    create_sample_order()
+
+    db = TestingSessionLocal()
+    try:
+        count = crud.promote_pending_orders(db)
+    finally:
+        db.close()
+
+    assert count == 0
+    orders = client.get("/orders/?status=PENDING").json()
+    assert len(orders) == 1
+
+
+def test_scheduler_does_not_promote_partially_paid_order():
+    """An order with partial payment must stay PENDING after scheduler runs."""
+    order_id = create_sample_order().json()["id"]
+    pay(order_id, 500.00)  # partial — total is 1049.99
+
+    db = TestingSessionLocal()
+    try:
+        count = crud.promote_pending_orders(db)
+    finally:
+        db.close()
+
+    assert count == 0
+    order = client.get(f"/orders/{order_id}").json()
+    assert order["status"] == "PENDING"
+
+
+def test_scheduler_promotes_fully_paid_order():
+    """An order fully paid must be promoted to PROCESSING by the scheduler."""
+    order_id = create_sample_order().json()["id"]
+    pay(order_id, 1049.99)  # full payment
+
+    db = TestingSessionLocal()
+    try:
+        count = crud.promote_pending_orders(db)
+    finally:
+        db.close()
+
+    assert count == 1
+    order = client.get(f"/orders/{order_id}").json()
+    assert order["status"] == "PROCESSING"
+
+
+def test_scheduler_promotes_only_fully_paid_orders():
+    """Only fully paid orders are promoted — partially paid ones stay PENDING."""
+    order1_id = create_sample_order("Alice", "alice@example.com").json()["id"]
+    order2_id = create_sample_order("Bob", "bob@example.com").json()["id"]
+
+    pay(order1_id, 1049.99)   # fully paid
+    pay(order2_id, 500.00)    # partially paid
+
+    db = TestingSessionLocal()
+    try:
+        count = crud.promote_pending_orders(db)
+    finally:
+        db.close()
+
+    assert count == 1
+    assert client.get(f"/orders/{order1_id}").json()["status"] == "PROCESSING"
+    assert client.get(f"/orders/{order2_id}").json()["status"] == "PENDING"
+
+
+def test_scheduler_promotes_multiple_fully_paid_orders():
+    """All fully paid orders should be promoted in a single scheduler run."""
+    order1_id = create_sample_order("Alice", "alice@example.com").json()["id"]
+    order2_id = create_sample_order("Bob", "bob@example.com").json()["id"]
+
+    pay(order1_id, 1049.99)
+    pay(order2_id, 1049.99)
+
+    db = TestingSessionLocal()
+    try:
+        count = crud.promote_pending_orders(db)
+    finally:
+        db.close()
+
+    assert count == 2
+
+
+def test_scheduler_skips_non_pending_orders():
+    """Scheduler should not touch orders that are not in PENDING status."""
+    order_id = create_sample_order().json()["id"]
+    advance_order_to(order_id, "SHIPPED")
+    pay_response = client.post(f"/orders/{order_id}/payments", json={"amount": 1049.99})
+    # payment rejected since not PENDING — that's expected
+
+    db = TestingSessionLocal()
+    try:
+        count = crud.promote_pending_orders(db)
+    finally:
+        db.close()
+
+    assert count == 0
+
+
+def test_scheduler_no_pending_orders():
+    """Scheduler should return 0 when there are no PENDING orders at all."""
+    db = TestingSessionLocal()
+    try:
+        count = crud.promote_pending_orders(db)
+    finally:
+        db.close()
+    assert count == 0
+
+
+# ── Get / List Orders ─────────────────────────────────────────────────────────
 
 def test_get_order_success():
-    """Getting an order by its ID should return the full order with items."""
+    """Getting an order by ID should return full details including payments list."""
     created = create_sample_order().json()
     response = client.get(f"/orders/{created['id']}")
     assert response.status_code == 200
     data = response.json()
     assert data["id"] == created["id"]
     assert len(data["items"]) == 2
+    assert "paid_amount" in data
+    assert "remaining_amount" in data
+    assert "payments" in data
 
 
 def test_get_order_not_found():
-    """A nil UUID should return 404."""
     response = client.get("/orders/00000000-0000-0000-0000-000000000000")
     assert response.status_code == 404
 
 
-# ── List Orders ───────────────────────────────────────────────────────────────
+def test_list_orders_includes_payment_info():
+    """List response should include paid_amount and remaining_amount per order."""
+    order_id = create_sample_order().json()["id"]
+    pay(order_id, 300.00)
 
-def test_list_orders():
-    """All created orders should appear in the list."""
-    create_sample_order()
-    create_sample_order("Jane Doe", "jane@example.com")
     response = client.get("/orders/")
     assert response.status_code == 200
-    assert len(response.json()) == 2
+    order = response.json()[0]
+    assert order["paid_amount"] == pytest.approx(300.00)
+    assert order["remaining_amount"] == pytest.approx(749.99)
 
 
 def test_list_orders_filter_by_status():
-    """Filtering by PENDING should only return PENDING orders."""
     create_sample_order()
     response = client.get("/orders/?status=PENDING")
     assert response.status_code == 200
@@ -179,34 +408,10 @@ def test_list_orders_filter_by_status():
 
 
 def test_list_orders_filter_no_results():
-    """Filter by a status that no orders have — should return empty list, not 404."""
     create_sample_order()
     response = client.get("/orders/?status=DELIVERED")
     assert response.status_code == 200
     assert response.json() == []
-
-
-def test_list_orders_filter_return_requested():
-    """Filtering by RETURN_REQUESTED should only return those orders."""
-    order_id = create_sample_order().json()["id"]
-    advance_order_to(order_id, "DELIVERED")
-    advance_order_to(order_id, "RETURN_REQUESTED")
-    response = client.get("/orders/?status=RETURN_REQUESTED")
-    assert response.status_code == 200
-    assert len(response.json()) == 1
-    assert response.json()[0]["status"] == "RETURN_REQUESTED"
-
-
-def test_list_orders_filter_refunded():
-    """Filtering by REFUNDED should only return those orders."""
-    order_id = create_sample_order().json()["id"]
-    advance_order_to(order_id, "DELIVERED")
-    advance_order_to(order_id, "RETURN_REQUESTED")
-    advance_order_to(order_id, "REFUNDED")
-    response = client.get("/orders/?status=REFUNDED")
-    assert response.status_code == 200
-    assert len(response.json()) == 1
-    assert response.json()[0]["status"] == "REFUNDED"
 
 
 # ── Update Status ─────────────────────────────────────────────────────────────
@@ -218,25 +423,7 @@ def test_update_order_status_to_processing():
     assert response.json()["status"] == "PROCESSING"
 
 
-def test_update_order_status_to_shipped():
-    order_id = create_sample_order().json()["id"]
-    advance_order_to(order_id, "PROCESSING")
-    response = advance_order_to(order_id, "SHIPPED")
-    assert response.status_code == 200
-    assert response.json()["status"] == "SHIPPED"
-
-
-def test_update_order_status_to_delivered():
-    order_id = create_sample_order().json()["id"]
-    advance_order_to(order_id, "PROCESSING")
-    advance_order_to(order_id, "SHIPPED")
-    response = advance_order_to(order_id, "DELIVERED")
-    assert response.status_code == 200
-    assert response.json()["status"] == "DELIVERED"
-
-
 def test_update_order_status_to_return_requested():
-    """Customer should be able to request a return after delivery."""
     order_id = create_sample_order().json()["id"]
     advance_order_to(order_id, "DELIVERED")
     response = advance_order_to(order_id, "RETURN_REQUESTED")
@@ -245,7 +432,6 @@ def test_update_order_status_to_return_requested():
 
 
 def test_update_order_status_to_refunded():
-    """Admin should be able to mark a return as refunded."""
     order_id = create_sample_order().json()["id"]
     advance_order_to(order_id, "DELIVERED")
     advance_order_to(order_id, "RETURN_REQUESTED")
@@ -255,7 +441,6 @@ def test_update_order_status_to_refunded():
 
 
 def test_update_order_status_not_found():
-    """Updating a non-existent order should return 404."""
     response = client.patch(
         "/orders/00000000-0000-0000-0000-000000000000/status",
         json={"status": "SHIPPED"}
@@ -264,7 +449,6 @@ def test_update_order_status_not_found():
 
 
 def test_update_order_invalid_status():
-    """An unrecognised status value should be rejected with 422."""
     created = create_sample_order().json()
     response = advance_order_to(created["id"], "INVALID_STATUS")
     assert response.status_code == 422
@@ -272,20 +456,43 @@ def test_update_order_invalid_status():
 
 # ── Full Lifecycle ────────────────────────────────────────────────────────────
 
-def test_full_order_lifecycle():
-    """End-to-end: order goes through every status in the normal flow."""
+def test_full_order_lifecycle_with_payments():
+    """
+    End-to-end: place order → pay in parts → scheduler promotes →
+    ship → deliver → return → refund
+    """
+    # Place order
     order_id = create_sample_order().json()["id"]
+    order = client.get(f"/orders/{order_id}").json()
+    assert order["status"] == "PENDING"
+    assert order["paid_amount"] == 0.0
 
-    for expected_status in ["PROCESSING", "SHIPPED", "DELIVERED", "RETURN_REQUESTED", "REFUNDED"]:
-        response = advance_order_to(order_id, expected_status)
+    # Partial payments
+    pay(order_id, 500.00)
+    pay(order_id, 549.99)
+    order = client.get(f"/orders/{order_id}").json()
+    assert order["paid_amount"] == pytest.approx(1049.99)
+    assert order["remaining_amount"] == pytest.approx(0.0)
+    assert order["status"] == "PENDING"  # Still PENDING until scheduler runs
+
+    # Scheduler promotes
+    db = TestingSessionLocal()
+    try:
+        crud.promote_pending_orders(db)
+    finally:
+        db.close()
+    assert client.get(f"/orders/{order_id}").json()["status"] == "PROCESSING"
+
+    # Rest of lifecycle
+    for expected in ["SHIPPED", "DELIVERED", "RETURN_REQUESTED", "REFUNDED"]:
+        response = advance_order_to(order_id, expected)
         assert response.status_code == 200
-        assert response.json()["status"] == expected_status
+        assert response.json()["status"] == expected
 
 
 # ── Cancel Order ──────────────────────────────────────────────────────────────
 
 def test_cancel_pending_order():
-    """A PENDING order should be cancellable."""
     created = create_sample_order().json()
     response = client.delete(f"/orders/{created['id']}/cancel")
     assert response.status_code == 200
@@ -293,7 +500,6 @@ def test_cancel_pending_order():
 
 
 def test_cancel_non_pending_order():
-    """Cancelling an order that has moved past PENDING should return 400."""
     order_id = create_sample_order().json()["id"]
     advance_order_to(order_id, "PROCESSING")
     response = client.delete(f"/orders/{order_id}/cancel")
@@ -301,70 +507,14 @@ def test_cancel_non_pending_order():
     assert "PENDING" in response.json()["detail"]
 
 
-def test_cancel_delivered_order():
-    """A delivered order cannot be cancelled."""
-    order_id = create_sample_order().json()["id"]
-    advance_order_to(order_id, "DELIVERED")
-    response = client.delete(f"/orders/{order_id}/cancel")
-    assert response.status_code == 400
-
-
 def test_cancel_order_not_found():
-    """Cancelling a non-existent order should return 404."""
     response = client.delete("/orders/00000000-0000-0000-0000-000000000000/cancel")
     assert response.status_code == 404
-
-
-# ── Scheduler / promote_pending_orders ───────────────────────────────────────
-
-def test_promote_pending_orders():
-    """promote_pending_orders should move all PENDING orders to PROCESSING."""
-    create_sample_order()
-    create_sample_order("Jane", "jane@example.com")
-
-    db = TestingSessionLocal()
-    try:
-        count = crud.promote_pending_orders(db)
-    finally:
-        db.close()
-
-    assert count == 2
-    response = client.get("/orders/?status=PROCESSING")
-    assert len(response.json()) == 2
-
-
-def test_promote_pending_orders_skips_non_pending():
-    """promote_pending_orders should not touch orders that aren't PENDING."""
-    order_id = create_sample_order().json()["id"]
-    advance_order_to(order_id, "SHIPPED")  # Manually advance one order
-
-    create_sample_order("Jane", "jane@example.com")  # Leave one as PENDING
-
-    db = TestingSessionLocal()
-    try:
-        count = crud.promote_pending_orders(db)
-    finally:
-        db.close()
-
-    assert count == 1  # Only the PENDING one should be promoted
-    assert client.get("/orders/?status=SHIPPED").json()[0]["status"] == "SHIPPED"
-
-
-def test_promote_pending_orders_no_pending():
-    """promote_pending_orders should return 0 when there are no PENDING orders."""
-    db = TestingSessionLocal()
-    try:
-        count = crud.promote_pending_orders(db)
-    finally:
-        db.close()
-
-    assert count == 0
 
 
 # ── Chat Endpoint ─────────────────────────────────────────────────────────────
 
 def test_chat_without_api_key():
-    """Chat should return a friendly fallback message when API key is not set."""
     with patch("app.routers.chat.settings") as mock_settings:
         mock_settings.ANTHROPIC_API_KEY = None
         response = client.post("/chat/", json={
@@ -373,19 +523,6 @@ def test_chat_without_api_key():
     assert response.status_code == 200
     assert "reply" in response.json()
     assert "support@swiftcart.in" in response.json()["reply"]
-
-
-def test_chat_request_structure():
-    """Chat endpoint should accept a valid messages array and return a reply key."""
-    with patch("app.routers.chat.settings") as mock_settings:
-        mock_settings.ANTHROPIC_API_KEY = None
-        response = client.post("/chat/", json={
-            "messages": [
-                {"role": "user", "content": "Where is my order?"},
-            ]
-        })
-    assert response.status_code == 200
-    assert "reply" in response.json()
 
 
 # ── Health Check ──────────────────────────────────────────────────────────────

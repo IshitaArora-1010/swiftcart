@@ -10,8 +10,8 @@ from app.database import Base
 
 class OrderStatus(str, enum.Enum):
     """All possible states an order can be in throughout its lifecycle."""
-    PENDING = "PENDING"                    # Order placed, not yet picked up
-    PROCESSING = "PROCESSING"              # Auto-promoted from PENDING after 5 minutes
+    PENDING = "PENDING"                    # Order placed, awaiting full payment
+    PROCESSING = "PROCESSING"              # Fully paid — promoted by background scheduler
     SHIPPED = "SHIPPED"                    # Dispatched by warehouse
     DELIVERED = "DELIVERED"               # Received by customer
     CANCELLED = "CANCELLED"               # Cancelled (only allowed from PENDING)
@@ -22,8 +22,8 @@ class OrderStatus(str, enum.Enum):
 class Order(Base):
     """
     Represents a customer order.
-    One order can have multiple items (see OrderItem).
-    total_amount is calculated at creation time from item prices.
+    Orders start in PENDING and are only promoted to PROCESSING by the
+    background scheduler once the total payments equal the total_amount.
     """
     __tablename__ = "orders"
 
@@ -47,6 +47,19 @@ class Order(Base):
     # One-to-many: an order has many items
     items = relationship("OrderItem", back_populates="order", cascade="all, delete-orphan")
 
+    # One-to-many: an order can have multiple partial payments
+    payments = relationship("Payment", back_populates="order", cascade="all, delete-orphan")
+
+    @property
+    def paid_amount(self) -> float:
+        """Sum of all payments made against this order so far."""
+        return round(sum(p.amount for p in self.payments), 2)
+
+    @property
+    def remaining_amount(self) -> float:
+        """Amount still outstanding before the order can be processed."""
+        return round(self.total_amount - self.paid_amount, 2)
+
 
 class OrderItem(Base):
     """
@@ -63,3 +76,20 @@ class OrderItem(Base):
 
     # Many-to-one: each item belongs to one order
     order = relationship("Order", back_populates="items")
+
+
+class Payment(Base):
+    """
+    Represents a single payment made towards an order.
+    Customers can make multiple partial payments — the order moves to
+    PROCESSING only when the sum of all payments equals the total_amount.
+    """
+    __tablename__ = "payments"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
+    order_id = Column(UUID(as_uuid=True), ForeignKey("orders.id"), nullable=False)
+    amount = Column(Float, nullable=False)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+
+    # Many-to-one: each payment belongs to one order
+    order = relationship("Order", back_populates="payments")

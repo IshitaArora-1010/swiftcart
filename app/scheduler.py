@@ -35,6 +35,7 @@ def start_scheduler() -> BackgroundScheduler:
     Called once during application startup (see main.py lifespan).
     Returns the scheduler instance so it can be shut down cleanly on exit.
     """
+
     scheduler = BackgroundScheduler()
     scheduler.add_job(
         process_pending_orders,
@@ -44,5 +45,6 @@ def start_scheduler() -> BackgroundScheduler:
         replace_existing=True,  # Safe to call start_scheduler again without duplicating jobs
     )
     scheduler.start()
+
     logger.info("[Scheduler] Started. Pending orders will be promoted every 5 minutes.")
     return scheduler

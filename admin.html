@@ -140,6 +140,17 @@ body{background:var(--bg);color:var(--text);font-family:'DM Sans',sans-serif;min
 .tbl{color:var(--muted);font-size:0.82rem;}
 .tba{font-family:'Playfair Display',serif;font-size:1.25rem;color:var(--accent);}
 
+/* Payment panel */
+.pay-panel{background:var(--s2);border:1px solid var(--border);border-radius:12px;padding:18px;margin-top:16px;}
+.pay-progress-track{height:6px;background:var(--border);border-radius:3px;margin:10px 0;}
+.pay-progress-fill{height:6px;border-radius:3px;background:var(--green);transition:width 0.4s ease;}
+.pay-progress-fill.partial{background:var(--orange);}
+.pay-history-row{display:flex;justify-content:space-between;font-size:0.82rem;padding:7px 0;border-bottom:1px solid rgba(39,37,32,0.6);}
+.pay-history-row:last-child{border-bottom:none;}
+.pay-badge-full{background:rgba(111,207,151,0.15);color:var(--green);padding:3px 10px;border-radius:20px;font-size:0.7rem;font-weight:700;}
+.pay-badge-partial{background:rgba(242,153,74,0.15);color:var(--orange);padding:3px 10px;border-radius:20px;font-size:0.7rem;font-weight:700;}
+.sbtn-disabled{opacity:0.35;cursor:not-allowed!important;pointer-events:none;}
+
 /* Toast */
 .toast{position:fixed;bottom:24px;right:24px;background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:12px 16px;font-size:0.84rem;font-weight:500;z-index:9999;transform:translateY(80px);opacity:0;transition:all 0.3s;max-width:290px;display:flex;align-items:center;gap:8px;}
 .toast.show{transform:translateY(0);opacity:1;}
@@ -219,11 +230,12 @@ body{background:var(--bg);color:var(--text);font-family:'DM Sans',sans-serif;min
         </div>
         <div class="stats-grid" id="stats-grid">
           <div class="stat-card"><div class="stat-icon">📦</div><div class="stat-label">Total Orders</div><div class="stat-val" id="st-total">—</div><div class="stat-sub">all time</div></div>
-          <div class="stat-card"><div class="stat-icon">⏳</div><div class="stat-label">Pending</div><div class="stat-val" style="color:var(--orange)" id="st-pending">—</div><div class="stat-sub">awaiting processing</div></div>
+          <div class="stat-card"><div class="stat-icon">⏳</div><div class="stat-label">Pending</div><div class="stat-val" style="color:var(--orange)" id="st-pending">—</div><div class="stat-sub">awaiting payment</div></div>
           <div class="stat-card"><div class="stat-icon">🚚</div><div class="stat-label">Shipped</div><div class="stat-val" style="color:var(--accent)" id="st-shipped">—</div><div class="stat-sub">on the way</div></div>
-          <div class="stat-card"><div class="stat-icon">💰</div><div class="stat-label">Revenue</div><div class="stat-val" style="color:var(--green);font-size:1.4rem;" id="st-revenue">—</div><div class="stat-sub">total delivered</div></div>
+          <div class="stat-card"><div class="stat-icon">💰</div><div class="stat-label">Revenue</div><div class="stat-val" style="color:var(--green);font-size:1.4rem;" id="st-revenue">—</div><div class="stat-sub">delivered orders</div></div>
         </div>
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px;">
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px;margin-bottom:14px;">
+          <div class="stat-card"><div class="stat-icon">💳</div><div class="stat-label">Payments Collected</div><div class="stat-val" style="color:var(--blue);font-size:1.4rem;" id="st-payments">—</div><div class="stat-sub">across all orders</div></div>
           <div class="stat-card"><div class="stat-icon">↩</div><div class="stat-label">Return Requests</div><div class="stat-val" style="color:var(--red);font-size:1.4rem;" id="st-returns">—</div><div class="stat-sub">needs action</div></div>
           <div class="stat-card"><div class="stat-icon">✅</div><div class="stat-label">Delivered</div><div class="stat-val" style="color:var(--green);font-size:1.4rem;" id="st-delivered">—</div><div class="stat-sub">completed</div></div>
         </div>
@@ -234,7 +246,7 @@ body{background:var(--bg);color:var(--text);font-family:'DM Sans',sans-serif;min
       </div>
 
       <!-- ORDERS SECTION (reusable) -->
-      <div class="section" id="sec-all-orders"><div id="orders-all"></div></div>
+      <div class="section" id="sec-all-orders"><div id="orders-all-orders"></div></div>
       <div class="section" id="sec-pending"><div id="orders-pending"></div></div>
       <div class="section" id="sec-processing"><div id="orders-processing"></div></div>
       <div class="section" id="sec-shipped"><div id="orders-shipped"></div></div>
@@ -312,18 +324,22 @@ async function loadDashboard(){
     const byStatus={};
     orders.forEach(o=>{byStatus[o.status]=(byStatus[o.status]||0)+1;});
     const revenue=orders.filter(o=>o.status==='DELIVERED').reduce((s,o)=>s+o.total_amount,0);
+    // payments collected = sum of paid_amount across all orders (from list response)
+    const paymentsCollected=orders.reduce((s,o)=>s+(o.paid_amount||0),0);
     document.getElementById('st-total').textContent=orders.length;
     document.getElementById('st-pending').textContent=byStatus['PENDING']||0;
     document.getElementById('st-shipped').textContent=byStatus['SHIPPED']||0;
     document.getElementById('st-revenue').textContent=inr(revenue);
+    document.getElementById('st-payments').textContent=inr(paymentsCollected);
     document.getElementById('st-returns').textContent=byStatus['RETURN_REQUESTED']||0;
     document.getElementById('st-delivered').textContent=byStatus['DELIVERED']||0;
     const recent=orders.slice(0,5);
     document.getElementById('recent-orders').innerHTML=recent.length?
-      `<table class="otable"><thead><tr><th>Customer</th><th>Amount</th><th>Status</th><th>Date</th><th></th></tr></thead>
+      `<table class="otable"><thead><tr><th>Customer</th><th>Amount</th><th>Paid</th><th>Status</th><th>Date</th><th></th></tr></thead>
       <tbody>${recent.map(o=>`<tr class="order-row" onclick="openModal('${o.id}')">
         <td><div class="tcust">${o.customer_name}</div><div class="temail">${o.customer_email}</div></td>
         <td><div class="tamt">${inr(o.total_amount)}</div></td>
+        <td><div style="font-size:0.82rem;">${inr(o.paid_amount||0)}<span style="color:var(--muted);font-size:0.75rem;"> / ${inr(o.total_amount)}</span></div></td>
         <td><span class="badge b${o.status}">${o.status.replace('_',' ')}</span></td>
         <td><div class="tdate">${fmtDate(o.created_at)}</div></td>
         <td><button class="btn bto btn-sm" onclick="event.stopPropagation();openModal('${o.id}')">Manage →</button></td>
@@ -358,17 +374,22 @@ let tableData={};
 function renderOrderTable(name, orders){
   tableData[name]=orders;
   const html=`<table class="otable" id="tbl-${name}"><thead><tr>
-    <th>Order ID</th><th>Customer</th><th>Items</th><th>Amount</th><th>Status</th><th>Date</th><th>Action</th>
-  </tr></thead><tbody>${orders.map(o=>`
-    <tr class="order-row" data-name="${o.customer_name.toLowerCase()}" data-email="${o.customer_email.toLowerCase()}" onclick="openModal('${o.id}')">
+    <th>Order ID</th><th>Customer</th><th>Amount</th><th>Payment</th><th>Status</th><th>Date</th><th>Action</th>
+  </tr></thead><tbody>${orders.map(o=>{
+    const pct=o.total_amount>0?Math.round(((o.paid_amount||0)/o.total_amount)*100):0;
+    const fully=pct>=100;
+    return`<tr class="order-row" data-name="${o.customer_name.toLowerCase()}" data-email="${o.customer_email.toLowerCase()}" onclick="openModal('${o.id}')">
       <td><div class="tid">${o.id.slice(0,8)}...</div></td>
       <td><div class="tcust">${o.customer_name}</div><div class="temail">${o.customer_email}</div></td>
-      <td><div style="font-size:0.82rem;color:var(--muted);">view details</div></td>
       <td><div class="tamt">${inr(o.total_amount)}</div></td>
+      <td>
+        <div style="font-size:0.8rem;">${inr(o.paid_amount||0)} <span style="color:var(--muted);">/ ${inr(o.total_amount)}</span></div>
+        <div class="pay-progress-track" style="margin:4px 0;"><div class="pay-progress-fill ${fully?'':'partial'}" style="width:${pct}%"></div></div>
+      </td>
       <td><span class="badge b${o.status}">${o.status.replace('_',' ')}</span></td>
       <td><div class="tdate">${fmtDate(o.created_at)}</div></td>
       <td><button class="btn btp btn-sm" onclick="event.stopPropagation();openModal('${o.id}')">Manage →</button></td>
-    </tr>`).join('')}</tbody></table>`;
+    </tr>`;}).join('')}</tbody></table>`;
   document.getElementById('table-'+name).innerHTML=html;
 }
 
@@ -385,21 +406,40 @@ async function openModal(id){
   document.getElementById('mbody').innerHTML='<div style="text-align:center;padding:28px;"><span class="spinner"></span></div>';
   document.getElementById('moverlay').classList.add('open');
   try{
-    const res=await fetch(`${API}/orders/${id}`);const o=await res.json();
+    const [orderRes, paymentsRes]=await Promise.all([
+      fetch(`${API}/orders/${id}`),
+      fetch(`${API}/orders/${id}/payments`)
+    ]);
+    const o=await orderRes.json();
+    const payments=paymentsRes.ok?await paymentsRes.json():[];
     document.getElementById('mtitle').textContent=`Order — ${o.customer_name}`;
     document.getElementById('mid').textContent='ID: '+o.id;
-    document.getElementById('mbody').innerHTML=buildOrderDetail(o);
+    document.getElementById('mbody').innerHTML=buildOrderDetail(o, payments);
   }catch{document.getElementById('mbody').innerHTML='<div style="color:var(--red);text-align:center;padding:22px;">Failed to load order.</div>';}
 }
 
-function buildOrderDetail(o){
-  const transitions=getTransitions(o.status);
+function buildOrderDetail(o, payments=[]){
+  const unpaid=(o.remaining_amount||0)>0.001;
+  const transitions=getTransitions(o.status, unpaid);
   const statusButtons=transitions.map(t=>`
-    <button class="sbtn sbtn-${t.to} ${o.status===t.to?'cur':''}" 
-      onclick="updateStatus('${o.id}','${t.to}')" 
-      ${o.status===t.to?'disabled':''}>
-      ${t.icon} ${t.label}
+    <button class="sbtn sbtn-${t.to}" style="${t.disabled?'opacity:0.35;cursor:not-allowed;':''}"
+      onclick="${t.disabled?'void(0)':(`updateStatus('${o.id}','${t.to}')`)}"
+      ${t.disabled?`disabled title="${t.tip}"`:''}>
+      ${t.icon} ${t.label}${t.disabled?` <span style="font-size:0.69rem;opacity:0.75;">(${t.tip})</span>`:''}
     </button>`).join('');
+
+  const paid=o.paid_amount||0;
+  const remaining=o.remaining_amount||0;
+  const pct=o.total_amount>0?Math.min(100,Math.round((paid/o.total_amount)*100)):0;
+  const fully=pct>=100;
+
+  const payRows=payments.length
+    ?payments.map(p=>`
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid rgba(39,37,32,0.6);font-size:0.83rem;">
+        <span style="color:var(--green);font-weight:600;">${inr(p.amount)}</span>
+        <span style="color:var(--muted);font-size:0.77rem;">${fmtDate(p.created_at)}</span>
+      </div>`).join('')
+    :`<div style="color:var(--muted);font-size:0.82rem;padding:10px 0;text-align:center;">No payments recorded yet</div>`;
 
   return `
     <div class="status-panel">
@@ -416,35 +456,53 @@ function buildOrderDetail(o){
       <div class="ib"><label>Order Date</label><div class="iv">${fmtDate(o.created_at)}</div></div>
       <div class="ib"><label>Last Updated</label><div class="iv">${fmtDate(o.updated_at)}</div></div>
     </div>
+
     <div style="font-size:0.69rem;font-weight:700;color:var(--muted);letter-spacing:0.08em;text-transform:uppercase;margin-bottom:8px;">Items (${o.items.length})</div>
     <table class="itable">
       <thead><tr><th>Product</th><th>Qty</th><th style="text-align:right">Unit Price</th><th style="text-align:right">Subtotal</th></tr></thead>
       <tbody>${o.items.map(it=>`<tr>
-        <td>${it.product_name}</td>
-        <td>${it.quantity}</td>
+        <td>${it.product_name}</td><td>${it.quantity}</td>
         <td style="text-align:right">${inr(it.unit_price)}</td>
         <td style="text-align:right;color:var(--accent)">${inr(it.quantity*it.unit_price)}</td>
       </tr>`).join('')}</tbody>
     </table>
-    <div class="tbar"><span class="tbl">Order Total</span><span class="tba">${inr(o.total_amount)}</span></div>`;
+    <div class="tbar"><span class="tbl">Order Total</span><span class="tba">${inr(o.total_amount)}</span></div>
+
+    <div style="background:var(--s2);border:1px solid var(--border);border-radius:12px;padding:18px;margin-top:16px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">
+        <div style="font-size:0.72rem;font-weight:700;color:var(--muted);letter-spacing:0.09em;text-transform:uppercase;">💳 Payment Status</div>
+        <span style="background:${fully?'rgba(111,207,151,0.15)':'rgba(242,153,74,0.15)'};color:${fully?'var(--green)':'var(--orange)'};padding:3px 10px;border-radius:20px;font-size:0.7rem;font-weight:700;">${fully?'✓ Fully Paid':'⚠ Partial'}</span>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:12px;">
+        <div><div style="font-size:0.69rem;color:var(--muted);margin-bottom:3px;text-transform:uppercase;letter-spacing:0.07em;">Total</div>
+          <div style="font-family:'Playfair Display',serif;font-size:1.1rem;">${inr(o.total_amount)}</div></div>
+        <div><div style="font-size:0.69rem;color:var(--muted);margin-bottom:3px;text-transform:uppercase;letter-spacing:0.07em;">Paid</div>
+          <div style="font-family:'Playfair Display',serif;font-size:1.1rem;color:var(--green);">${inr(paid)}</div></div>
+        <div><div style="font-size:0.69rem;color:var(--muted);margin-bottom:3px;text-transform:uppercase;letter-spacing:0.07em;">Remaining</div>
+          <div style="font-family:'Playfair Display',serif;font-size:1.1rem;color:${fully?'var(--green)':'var(--orange)'};">${inr(remaining)}</div></div>
+      </div>
+      <div style="height:6px;background:var(--border);border-radius:3px;margin-bottom:4px;">
+        <div style="height:6px;border-radius:3px;background:${fully?'var(--green)':'var(--orange)'};width:${pct}%;transition:width 0.4s;"></div>
+      </div>
+      <div style="font-size:0.72rem;color:var(--muted);text-align:right;margin-bottom:14px;">${pct}% paid</div>
+      <div style="font-size:0.69rem;font-weight:700;color:var(--muted);letter-spacing:0.08em;text-transform:uppercase;margin-bottom:6px;">Payment History (${payments.length})</div>
+      ${payRows}
+    </div>`;
 }
 
-function getTransitions(status){
+function getTransitions(status, unpaid=false){
   const all={
     PENDING:[
-      {to:'PROCESSING',label:'Mark Processing',icon:'⚙️'},
+      {to:'PROCESSING',label:'Mark Processing',icon:'⚙️',
+       disabled:unpaid, tip:'awaiting full payment'},
       {to:'CANCELLED',label:'Cancel Order',icon:'✕'}
     ],
     PROCESSING:[
       {to:'SHIPPED',label:'Mark Shipped',icon:'🚚'},
       {to:'CANCELLED',label:'Cancel Order',icon:'✕'}
     ],
-    SHIPPED:[
-      {to:'DELIVERED',label:'Mark Delivered',icon:'✅'}
-    ],
-    DELIVERED:[
-      {to:'RETURN_REQUESTED',label:'Process Return',icon:'↩'}
-    ],
+    SHIPPED:[{to:'DELIVERED',label:'Mark Delivered',icon:'✅'}],
+    DELIVERED:[{to:'RETURN_REQUESTED',label:'Process Return',icon:'↩'}],
     RETURN_REQUESTED:[
       {to:'REFUNDED',label:'Issue Refund',icon:'💸'},
       {to:'DELIVERED',label:'Reject Return',icon:'✕'}

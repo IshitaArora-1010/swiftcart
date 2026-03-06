@@ -549,7 +549,7 @@ main{max-width:1200px;margin:0 auto;padding:40px 24px;}
       <div class="care-channels">
         <div class="care-channel">
           <div class="cc-icon" style="background:rgba(90,143,214,0.12);">📧</div>
-          <div><div class="cc-label">Email Support</div><div class="cc-val">support@swiftcart.in</div></div>
+          <div><div class="cc-label">Email Support</div><div class="cc-val"><a href="/cdn-cgi/l/email-protection" class="__cf_email__" data-cfemail="27545257574855536754504e415344465553094e49">[email&#160;protected]</a></div></div>
           <button class="cc-copy" onclick="copyEmail()">Copy</button>
         </div>
         <div class="care-channel">
@@ -604,7 +604,7 @@ main{max-width:1200px;margin:0 auto;padding:40px 24px;}
 </div>
 <div class="toast" id="toast"></div>
 
-<script>
+<script data-cfasync="false" src="/cdn-cgi/scripts/5c5dd728/cloudflare-static/email-decode.min.js"></script><script>
 const API='http://localhost:8000';
 const PRODUCTS=[
   // ── Electronics ────────────────────────────────────────────────────────────
@@ -1033,80 +1033,63 @@ async function checkout(){
   if(!cart.length)return toast('Cart is empty!','error');
   const addrErr=validateAddress();
   if(addrErr)return toast(addrErr,'error');
-
-  if(selectedPay==='razorpay'){
-    doRazorpay();
-  } else {
-    const btn=document.getElementById('co-btn');
-    btn.disabled=true;btn.innerHTML='<span class="spinner"></span> Placing...';
-    try{
-      const order=await placeOrderAPI();
-      toast('Order placed! 🎉');cart=[];updateBadge();
-      setTimeout(()=>{showPage('track');document.getElementById('track-id').value=order.id;trackOrder();},600);
-    }catch{toast('Failed to place order. Is the server running?','error');}
-    finally{btn.disabled=false;btn.innerHTML='Place Order (COD) →';}
-  }
-}
-
-function doRazorpay(){
-  const total=cart.reduce((s,c)=>s+c.product.price*c.qty,0)+(cart.reduce((s,c)=>s+c.product.price*c.qty,0)>999?0:99);
-  if(!window.Razorpay){
-    // Load script dynamically
-    const s=document.createElement('script');s.src='https://checkout.razorpay.com/v1/checkout.js';
-    s.onload=()=>openRazorpay(total);
-    s.onerror=()=>toast('Could not load payment gateway. Try COD.','error');
-    document.head.appendChild(s);
-  } else openRazorpay(total);
-}
-
-function openRazorpay(total){
-  const options={
-    key:'rzp_test_placeholder', // ← Replace with your Razorpay Test Key
-    amount:total*100, // paise
-    currency:'INR',
-    name:'SwiftCart',
-    description:'Order Payment',
-    image:'',
-    prefill:{name:currentUser.name,email:currentUser.email,contact:document.getElementById('co-phone')?.value||''},
-    theme:{color:'#d4a853'},
-    handler:async function(response){
-      // Payment success — now create the order
-      const btn=document.getElementById('co-btn');
-      if(btn){btn.disabled=true;btn.innerHTML='<span class="spinner"></span> Confirming...';}
-      try{
-        const order=await placeOrderAPI();
-        toast(`Payment successful! Order placed 🎉`,'success');
-        cart=[];updateBadge();
-        setTimeout(()=>{showPage('track');document.getElementById('track-id').value=order.id;trackOrder();},600);
-      }catch{toast('Payment done but order failed. Contact support.','error');}
-      finally{if(btn){btn.disabled=false;btn.innerHTML='Proceed to Pay →';}}
-    },
-    modal:{ondismiss:()=>toast('Payment cancelled. Try again or use COD.','error')}
-  };
+  const btn=document.getElementById('co-btn');
+  btn.disabled=true;btn.innerHTML='<span class="spinner"></span> Placing...';
   try{
-    const rz=new window.Razorpay(options);rz.open();
-  }catch(e){
-    toast('Payment gateway not configured. Please use Cash on Delivery.','error');
-    selectPay('cod');
-  }
+    const order=await placeOrderAPI();
+    toast('Order placed! Pay now to confirm processing 🎉');
+    cart=[];updateBadge();
+    setTimeout(()=>{showPage('track');document.getElementById('track-id').value=order.id;trackOrder();},600);
+  }catch{toast('Failed to place order. Is the server running?','error');}
+  finally{btn.disabled=false;btn.innerHTML='Place Order →';}
 }
 
 // ── TRACK ─────────────────────────────────────────────────────────────────────
 async function trackOrder(){
   const id=document.getElementById('track-id').value.trim();
   if(!id)return toast('Please enter an Order ID','error');
-  const c=document.getElementById('track-result');c.innerHTML='<div style="text-align:center;padding:32px;"><span class="spinner"></span></div>';
+  const c=document.getElementById('track-result');
+  c.innerHTML='<div style="text-align:center;padding:32px;"><span class="spinner"></span></div>';
   try{
-    const res=await fetch(`${API}/orders/${id}`);
-    if(res.status===404){c.innerHTML=`<div class="card" style="text-align:center;padding:36px;margin-top:14px;"><div style="font-size:2.4rem;opacity:0.4;margin-bottom:10px;">🔍</div><div style="color:var(--muted);">No order found with that ID</div></div>`;return;}
-    c.innerHTML=buildTrackCard(await res.json());
+    const [orderRes,paymentsRes]=await Promise.all([
+      fetch(`${API}/orders/${id}`),
+      fetch(`${API}/orders/${id}/payments`)
+    ]);
+    if(orderRes.status===404){c.innerHTML=`<div class="card" style="text-align:center;padding:36px;margin-top:14px;"><div style="font-size:2.4rem;opacity:0.4;margin-bottom:10px;">🔍</div><div style="color:var(--muted);">No order found with that ID</div></div>`;return;}
+    const o=await orderRes.json();
+    const payments=paymentsRes.ok?await paymentsRes.json():[];
+    c.innerHTML=buildTrackCard(o,payments);
   }catch{c.innerHTML='<div class="card" style="text-align:center;color:var(--red);padding:22px;margin-top:14px;">Could not fetch order.</div>';}
 }
-function buildTrackCard(o){
-  const flow=['PENDING','PROCESSING','SHIPPED','DELIVERED'];const ci=flow.indexOf(o.status),sp=['CANCELLED','RETURN_REQUESTED','REFUNDED'].includes(o.status);
+
+function buildTrackCard(o, payments=[]){
+  const flow=['PENDING','PROCESSING','SHIPPED','DELIVERED'];
+  const flowLabels=['Awaiting Payment','Processing','Shipped','Delivered'];
+  const ci=flow.indexOf(o.status),sp=['CANCELLED','RETURN_REQUESTED','REFUNDED'].includes(o.status);
   const scol={CANCELLED:'var(--red)',RETURN_REQUESTED:'var(--orange)',REFUNDED:'var(--green)'}[o.status];
-  const tl=sp?`<div style="text-align:center;padding:14px;color:${scol};font-weight:500;">${o.status==='REFUNDED'?'✓ Refund processed':o.status==='RETURN_REQUESTED'?'↩ Return requested — we will get back to you shortly':'✕ Order was cancelled'}</div>`
-    :`<div class="timeline">${flow.map((s,i)=>{const cls=i<ci?'done':i===ci?'cur':'';return`<div class="tls ${cls}"><div class="tld">${i<ci?'✓':i===ci?'●':''}</div><div class="tll">${s}</div></div>`}).join('')}</div>`;
+  const tl=sp
+    ?`<div style="text-align:center;padding:14px;color:${scol};font-weight:500;">${o.status==='REFUNDED'?'✓ Refund processed':o.status==='RETURN_REQUESTED'?'↩ Return requested — we will get back to you shortly':'✕ Order was cancelled'}</div>`
+    :`<div class="timeline">${flow.map((s,i)=>{const cls=i<ci?'done':i===ci?'cur':'';return`<div class="tls ${cls}"><div class="tld">${i<ci?'✓':i===ci?'●':''}</div><div class="tll">${flowLabels[i]}</div></div>`}).join('')}</div>`;
+
+  const paid=o.paid_amount||0;
+  const remaining=o.remaining_amount||0;
+  const pct=o.total_amount>0?Math.min(100,Math.round((paid/o.total_amount)*100)):0;
+  const fully=pct>=100;
+
+  // Payment history rows
+  const payRows=payments.length
+    ?payments.map(p=>`<div style="display:flex;justify-content:space-between;font-size:0.82rem;padding:7px 0;border-bottom:1px solid rgba(42,39,32,0.5);"><span style="color:var(--green);font-weight:600;">+ ${inr(p.amount)}</span><span style="color:var(--muted);font-size:0.76rem;">${fmtDate(p.created_at)}</span></div>`).join('')
+    :`<div style="color:var(--muted);font-size:0.82rem;padding:8px 0;">No payments yet</div>`;
+
+  // Payment input — only show if PENDING and not fully paid
+  const payInput=o.status==='PENDING'&&!fully?`
+    <div style="display:flex;gap:8px;margin-top:12px;">
+      <input id="pay-amt-${o.id}" type="number" min="1" max="${remaining}" step="0.01"
+        placeholder="Amount (max ${inr(remaining)})"
+        style="flex:1;background:var(--bg);border:1px solid var(--border);border-radius:9px;color:var(--text);font-family:'DM Sans',sans-serif;font-size:0.86rem;padding:10px 13px;outline:none;"/>
+      <button class="btn btp" style="white-space:nowrap;" onclick="makePayment('${o.id}', this)">Pay Now</button>
+    </div>`:'';
+
   return `<div class="card" style="margin-top:14px;border-color:rgba(212,168,83,0.15)">
     <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:10px;margin-bottom:16px;">
       <div><div style="font-size:0.7rem;color:var(--muted);margin-bottom:3px;">ORDER ID</div><div style="font-family:monospace;font-size:0.76rem;word-break:break-all;">${o.id}</div></div>
@@ -1120,12 +1103,46 @@ function buildTrackCard(o){
     <table class="itable"><thead><tr><th>Product</th><th>Qty</th><th style="text-align:right">Price</th><th style="text-align:right">Subtotal</th></tr></thead>
     <tbody>${o.items.map(it=>`<tr><td>${it.product_name}</td><td>${it.quantity}</td><td style="text-align:right">${inr(it.unit_price)}</td><td style="text-align:right;color:var(--accent)">${inr(it.quantity*it.unit_price)}</td></tr>`).join('')}</tbody></table>
     <div class="tbar"><span class="tbl">Total</span><span class="tba">${inr(o.total_amount)}</span></div>
+
+    <div style="background:var(--s2);border:1px solid var(--border);border-radius:12px;padding:16px;margin-top:14px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+        <span style="font-size:0.72rem;font-weight:700;color:var(--muted);letter-spacing:0.08em;text-transform:uppercase;">💳 Payment</span>
+        <span style="background:${fully?'rgba(93,191,135,0.15)':'rgba(212,168,83,0.12)'};color:${fully?'var(--green)':'var(--accent)'};padding:3px 10px;border-radius:20px;font-size:0.7rem;font-weight:700;">${fully?'✓ Fully Paid':'⏳ Pending'}</span>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px;">
+        <div><div style="font-size:0.69rem;color:var(--muted);margin-bottom:2px;">Paid</div><div style="font-weight:700;color:var(--green);">${inr(paid)}</div></div>
+        <div><div style="font-size:0.69rem;color:var(--muted);margin-bottom:2px;">Remaining</div><div style="font-weight:700;color:${fully?'var(--green)':'var(--accent)'};">${inr(remaining)}</div></div>
+      </div>
+      <div style="height:5px;background:var(--border);border-radius:3px;margin-bottom:10px;">
+        <div style="height:5px;border-radius:3px;background:${fully?'var(--green)':'var(--accent)'};width:${pct}%;transition:width 0.4s;"></div>
+      </div>
+      <div style="font-size:0.69rem;font-weight:700;color:var(--muted);letter-spacing:0.08em;text-transform:uppercase;margin-bottom:6px;">Payment History</div>
+      ${payRows}
+      ${payInput}
+    </div>
+
     <div style="margin-top:14px;display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap;">
       ${o.status==='PENDING'?`<button class="btn btd" onclick="cancelTrack('${o.id}')">Cancel Order</button>`:''}
       ${o.status==='DELIVERED'?`<button class="btn bto" onclick="requestReturn('${o.id}')">↩ Request Return</button>`:''}
     </div>
   </div>`;
 }
+
+async function makePayment(orderId, btn){
+  const inp=btn ? btn.parentElement.querySelector('input[type="number"]') : document.getElementById('pay-amt-'+orderId);
+  const amount=parseFloat(inp?.value);
+  if(!inp||!amount||amount<=0)return toast('Enter a valid amount','error');
+  if(btn)btn.disabled=true; inp.disabled=true;
+  try{
+    const res=await fetch(`${API}/orders/${orderId}/payments`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({amount})});
+    if(!res.ok){const e=await res.json();toast(e.detail||'Payment failed','error');return;}
+    toast(`Payment of ${inr(amount)} recorded!`);
+    const trackInput=document.getElementById('track-id');
+    if(trackInput&&trackInput.value.trim()===orderId){trackOrder();}else{openM(orderId);}
+  }catch{toast('Payment failed. Try again.','error');}
+  finally{if(btn)btn.disabled=false; inp.disabled=false;}
+}
+
 async function cancelTrack(id){if(!confirm('Cancel this order?'))return;try{const res=await fetch(`${API}/orders/${id}/cancel`,{method:'DELETE'});if(!res.ok){const e=await res.json();return toast(e.detail||'Cannot cancel.','error');}toast('Order cancelled.');trackOrder();}catch{toast('Failed.','error');}}
 async function requestReturn(id){if(!confirm('Request a return for this order?'))return;try{const res=await fetch(`${API}/orders/${id}/status`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({status:'RETURN_REQUESTED'})});if(!res.ok)throw new Error();toast('Return requested!');const trackInput=document.getElementById('track-id');if(trackInput&&trackInput.value.trim()===id){trackOrder();}else{closeM();loadOrders(curFilter);}}catch{toast('Failed to request return.','error');}}
 
@@ -1136,10 +1153,27 @@ async function loadOrders(status){
   try{
     const res=await fetch(status?`${API}/orders/?status=${status}`:`${API}/orders/`);const orders=await res.json();
     if(!orders.length){c.innerHTML=`<div class="empty"><div class="empty-icon">📭</div><div>No orders found.</div></div>`;return;}
-    c.innerHTML=orders.map(o=>`<div class="ocard" onclick="openM('${o.id}')">
-      <div><div class="oid">ID: ${o.id.slice(0,8)}...${o.id.slice(-4)}</div><div class="oname">${o.customer_name}</div><div class="ometa">${o.customer_email} · ${fmtDate(o.created_at)}</div></div>
-      <div><div class="oamt">${inr(o.total_amount)}</div><span class="badge b${o.status}">${o.status.replace('_',' ')}</span></div>
-    </div>`).join('');
+    c.innerHTML=orders.map(o=>{
+      const paid=o.paid_amount||0;
+      const pct=o.total_amount>0?Math.min(100,Math.round((paid/o.total_amount)*100)):0;
+      const fully=pct>=100;
+      return`<div class="ocard" onclick="openM('${o.id}')">
+        <div>
+          <div class="oid">ID: ${o.id.slice(0,8)}...${o.id.slice(-4)}</div>
+          <div class="oname">${o.customer_name}</div>
+          <div class="ometa">${o.customer_email} · ${fmtDate(o.created_at)}</div>
+          <div style="margin-top:6px;display:flex;align-items:center;gap:8px;">
+            <div style="flex:1;max-width:120px;height:4px;background:var(--border);border-radius:2px;">
+              <div style="height:4px;border-radius:2px;background:${fully?'var(--green)':'var(--accent)'};width:${pct}%"></div>
+            </div>
+            <span style="font-size:0.74rem;color:${fully?'var(--green)':'var(--muted)'};">${fully?'Paid':inr(paid)+' paid'}</span>
+          </div>
+        </div>
+        <div style="text-align:right;">
+          <div class="oamt">${inr(o.total_amount)}</div>
+          <span class="badge b${o.status}">${o.status.replace('_',' ')}</span>
+        </div>
+      </div>`;}).join('');
   }catch{c.innerHTML='<div class="card" style="text-align:center;color:var(--red);padding:22px;">Could not load orders.</div>';}
 }
 function fOrders(s,btn){document.querySelectorAll('.fbtn').forEach(b=>b.classList.remove('active'));btn.classList.add('active');loadOrders(s);}
@@ -1149,10 +1183,15 @@ async function openM(id){
   document.getElementById('mbody').innerHTML='<div style="text-align:center;padding:28px;"><span class="spinner"></span></div>';
   document.getElementById('moverlay').classList.add('open');
   try{
-    const res=await fetch(`${API}/orders/${id}`);const o=await res.json();
+    const [orderRes,paymentsRes]=await Promise.all([
+      fetch(`${API}/orders/${id}`),
+      fetch(`${API}/orders/${id}/payments`)
+    ]);
+    const o=await orderRes.json();
+    const payments=paymentsRes.ok?await paymentsRes.json():[];
     document.getElementById('mtitle').textContent=`${o.customer_name}'s Order`;
     document.getElementById('mid').textContent='ID: '+o.id;
-    document.getElementById('mbody').innerHTML=buildTrackCard(o).replace('margin-top:14px;','');
+    document.getElementById('mbody').innerHTML=buildTrackCard(o,payments).replace('margin-top:14px;','');
   }catch{document.getElementById('mbody').innerHTML='<div style="color:var(--red);text-align:center;padding:22px;">Failed to load.</div>';}
 }
 function closeMO(e){if(e.target===document.getElementById('moverlay'))closeM();}
@@ -1241,7 +1280,7 @@ async function sendChat(){
   document.getElementById('chat-send-btn').disabled=false;
 }
 
-// ── INIT ──────────────────────────────────────────────────────────────────────
+// ── INIT ──────�
 checkAuth();
 </script>
 </body>

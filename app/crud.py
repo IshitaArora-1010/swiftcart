@@ -10,8 +10,8 @@ def create_order(db: Session, order_data: schemas.OrderCreate) -> models.Order:
     """
     Create a new order with one or more items.
     Calculates total_amount by summing (quantity × unit_price) for each item.
-    The order starts in PENDING status and is auto-promoted to PROCESSING
-    by the background scheduler after 5 minutes.
+    The order starts in PENDING status. It will only be promoted to PROCESSING
+    by the background scheduler once payments cover the full total_amount.
     """
     total_amount = sum(item.quantity * item.unit_price for item in order_data.items)
 
@@ -92,19 +92,81 @@ def cancel_order(db: Session, order_id: UUID) -> Optional[models.Order]:
     return db_order
 
 
+def create_payment(db: Session, order_id: UUID, payment_data: schemas.PaymentCreate) -> models.Payment:
+    """
+    Record a payment against an order.
+
+    Rules enforced:
+    - Order must exist (raises ValueError if not)
+    - Order must be in PENDING status — cannot pay for cancelled or already-processing orders
+    - Payment cannot exceed the remaining balance (prevents overpayment)
+
+    After payment is recorded, the caller should let the background scheduler
+    handle the PENDING → PROCESSING transition on its next run.
+    """
+    db_order = get_order(db, order_id)
+    if not db_order:
+        raise ValueError(f"Order with ID {order_id} not found")
+
+    if db_order.status != OrderStatus.PENDING:
+        raise ValueError(
+            f"Cannot make a payment for an order with status '{db_order.status}'. "
+            "Payments are only accepted for PENDING orders."
+        )
+
+    # Prevent overpayment — payment must not exceed the outstanding balance
+    remaining = db_order.remaining_amount
+    if payment_data.amount > remaining:
+        raise ValueError(
+            f"Payment of {payment_data.amount} exceeds the remaining balance of {remaining}. "
+            "You cannot overpay an order."
+        )
+
+    db_payment = models.Payment(
+        order_id=order_id,
+        amount=payment_data.amount,
+    )
+    db.add(db_payment)
+    db.commit()
+    db.refresh(db_payment)
+    return db_payment
+
+
+def get_payments_for_order(db: Session, order_id: UUID) -> List[models.Payment]:
+    """
+    Fetch all payments made against a specific order, sorted oldest first.
+    Returns an empty list if the order has no payments yet.
+    """
+    return (
+        db.query(models.Payment)
+        .filter(models.Payment.order_id == order_id)
+        .order_by(models.Payment.created_at.asc())
+        .all()
+    )
+
+
 def promote_pending_orders(db: Session) -> int:
     """
-    Background job function: promotes all PENDING orders to PROCESSING.
-    Called every 5 minutes by the APScheduler (see scheduler.py).
-    Returns the number of orders that were promoted.
+    Background job function: promotes fully paid PENDING orders to PROCESSING.
+
+    An order is eligible for promotion only when:
+        sum of all its payments >= total_amount
+
+    Orders that are still partially paid remain in PENDING until the
+    customer completes their payment.
+
+    Returns the number of orders promoted.
     """
     pending_orders = db.query(models.Order).filter(
         models.Order.status == OrderStatus.PENDING
     ).all()
 
-    count = len(pending_orders)
+    count = 0
     for order in pending_orders:
-        order.status = OrderStatus.PROCESSING
+        # Use the computed property from the model to check payment completion
+        if order.paid_amount >= order.total_amount:
+            order.status = OrderStatus.PROCESSING
+            count += 1
 
     db.commit()
     return count
